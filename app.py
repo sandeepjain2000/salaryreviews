@@ -336,14 +336,14 @@ def format_eur_rate_note(rate):
         return "EUR conversion unavailable"
     return f"EUR conversion: 1 EUR = ₹{rate:,.2f}"
 
-def calculate_tenure(start_date_str):
-    if not start_date_str:
+def calculate_tenure(doj_str):
+    if not doj_str:
         return "N/A"
     try:
-        start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+        joining_date = datetime.strptime(doj_str, "%Y-%m-%d").date()
         today = date.today()
-        years = today.year - start_date.year
-        months = today.month - start_date.month
+        years = today.year - joining_date.year
+        months = today.month - joining_date.month
         if months < 0:
             years -= 1
             months += 12
@@ -356,7 +356,75 @@ def calculate_tenure(start_date_str):
         
         return " ".join(parts) if parts else "Joined recently"
     except Exception:
-        return start_date_str
+        return doj_str
+
+def format_tenure(tenure_val, doj_str):
+    if tenure_val is not None and str(tenure_val).strip() != "" and not pd.isna(tenure_val):
+        try:
+            return f"{float(tenure_val):.1f} yrs"
+        except ValueError:
+            pass
+    # Fallback to calculating on the fly as fractional years
+    if not doj_str:
+        return "N/A"
+    try:
+        doj = datetime.strptime(doj_str, "%Y-%m-%d").date()
+        today = date.today()
+        days_diff = (today - doj).days
+        if days_diff < 0:
+            return "0.0 yrs"
+        val = round(days_diff / 365.25, 1)
+        return f"{val:.1f} yrs"
+    except Exception:
+        return "N/A"
+
+def num_to_words_indian(num):
+    if num is None or pd.isna(num):
+        return ""
+    try:
+        num = int(round(float(num)))
+    except (ValueError, TypeError):
+        return ""
+    if num == 0:
+        return "Zero Rupees"
+    
+    def helper(n):
+        units = ["", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten",
+                 "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen", "Nineteen"]
+        tens = ["", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety"]
+        
+        if n < 20:
+            return units[n]
+        elif n < 100:
+            return tens[n // 10] + (" " + units[n % 10] if n % 10 != 0 else "")
+        elif n < 1000:
+            return units[n // 100] + " Hundred" + (" and " + helper(n % 100) if n % 100 != 0 else "")
+        return ""
+
+    parts = []
+    
+    # Crores (10,000,000+)
+    if num >= 10000000:
+        parts.append(helper(num // 10000000) + " Crore")
+        num %= 10000000
+        
+    # Lakhs (100,000+)
+    if num >= 100000:
+        parts.append(helper(num // 100000) + " Lakh")
+        num %= 100000
+        
+    # Thousands (1,000+)
+    if num >= 1000:
+        parts.append(helper(num // 1000) + " Thousand")
+        num %= 1000
+        
+    # Hundreds / Tens / Units
+    if num > 0:
+        parts.append(helper(num))
+        
+    res = " ".join(parts)
+    res = " ".join(res.split())
+    return res.strip() + " Rupees"
 
 def render_header(title, tag):
     col_title, col_tag = st.columns([8, 1])
@@ -443,12 +511,49 @@ def db_to_excel():
     conn = sqlite3.connect(DB_PATH)
     df_employees = pd.read_sql_query("SELECT * FROM employees", conn)
     df_reviews = pd.read_sql_query("SELECT * FROM salary_reviews", conn)
+    try:
+        df_bonuses = pd.read_sql_query("SELECT * FROM bonuses", conn)
+    except Exception:
+        df_bonuses = pd.DataFrame()
     conn.close()
     
+    eur_rate = 90.0
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        res = conn.execute("SELECT value FROM settings WHERE key = 'eur_to_inr_rate'").fetchone()
+        if res:
+            eur_rate = float(res[0])
+        conn.close()
+    except Exception:
+        pass
+
+    # Add EUR columns in employees
+    if not df_employees.empty and eur_rate > 0:
+        df_employees.insert(df_employees.columns.get_loc('joining_salary') + 1, 'joining_salary_eur', 
+                            df_employees['joining_salary'].apply(lambda x: round(x / eur_rate, 2) if pd.notna(x) else None))
+        df_employees.insert(df_employees.columns.get_loc('current_salary') + 1, 'current_salary_eur', 
+                            df_employees['current_salary'].apply(lambda x: round(x / eur_rate, 2) if pd.notna(x) else None))
+
+    # Add EUR columns in reviews
+    if not df_reviews.empty and eur_rate > 0:
+        df_reviews.insert(df_reviews.columns.get_loc('previous_salary') + 1, 'previous_salary_eur', 
+                           df_reviews['previous_salary'].apply(lambda x: round(x / eur_rate, 2) if pd.notna(x) else None))
+        df_reviews.insert(df_reviews.columns.get_loc('increment_amount') + 1, 'increment_amount_eur', 
+                           df_reviews['increment_amount'].apply(lambda x: round(x / eur_rate, 2) if pd.notna(x) else None))
+        df_reviews.insert(df_reviews.columns.get_loc('new_salary') + 1, 'new_salary_eur', 
+                           df_reviews['new_salary'].apply(lambda x: round(x / eur_rate, 2) if pd.notna(x) else None))
+
+    # Add EUR columns in bonuses
+    if not df_bonuses.empty and eur_rate > 0:
+        df_bonuses.insert(df_bonuses.columns.get_loc('amount') + 1, 'amount_eur', 
+                          df_bonuses['amount'].apply(lambda x: round(x / eur_rate, 2) if pd.notna(x) else None))
+
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df_employees.to_excel(writer, index=False, sheet_name='Employees')
         df_reviews.to_excel(writer, index=False, sheet_name='Salary Reviews')
+        if not df_bonuses.empty:
+            df_bonuses.to_excel(writer, index=False, sheet_name='Bonuses')
     processed_data = output.getvalue()
     return processed_data
 
@@ -481,7 +586,7 @@ if "next_page" in st.session_state and st.session_state.next_page:
 
 menu = st.sidebar.radio(
     "NAVIGATION",
-    ["📊 Dashboard Overview", "📋 Employee Directory", "👤 Employee Profiles", "📜 Review History", "📈 Record New Review", "📅 Review Planner (Review-27)", "⚙️ Manage Employees", "🎁 Bonuses", "⚙️ System Settings"],
+    ["📊 Dashboard Overview", "📋 Employee Directory", "👤 Employee Profiles", "📜 Review History", "📈 Record New Review", "📅 Review Planner (Review-26)", "⚙️ Manage Employees", "🎁 Bonuses", "⚙️ System Settings"],
     key="nav_menu"
 )
 
@@ -576,20 +681,41 @@ if menu == "📊 Dashboard Overview":
         
     # Main Content Area - Full Width
     st.markdown("<div class='content-section'>", unsafe_allow_html=True)
-    c_title, c_exp = st.columns([3, 1])
+    c_title, c_btn, c_exp = st.columns([2.2, 1.0, 0.8])
     with c_title:
         st.markdown("<div class='section-title'>Active Employees Salary Sheet</div>", unsafe_allow_html=True)
-    
+    with c_btn:
+        if st.button("🔄 Update Tenure", type="secondary", use_container_width=True, help="Recalculate tenure for all employees and save to database"):
+            emps = execute_query("SELECT id, date_of_joining FROM employees")
+            updated_count = 0
+            for emp in emps:
+                doj_str = emp['date_of_joining']
+                if doj_str:
+                    try:
+                        doj = datetime.strptime(doj_str, "%Y-%m-%d").date()
+                        today = date.today()
+                        days_diff = (today - doj).days
+                        tenure_val = round(days_diff / 365.25, 1) if days_diff >= 0 else 0.0
+                    except Exception:
+                        tenure_val = None
+                else:
+                    tenure_val = None
+                
+                execute_query("UPDATE employees SET tenure = ? WHERE id = ?", (tenure_val, emp['id']), commit=True)
+                updated_count += 1
+            st.success(f"Updated tenure for {updated_count} employees!")
+            st.rerun()
+            
     # Load employees data
     employees = execute_query("""
-        SELECT id, name, start_date, joining_salary, current_salary, status 
+        SELECT id, name, date_of_joining, role, joining_salary, current_salary, status, tenure 
         FROM employees 
         ORDER BY current_salary DESC
     """)
     
     if employees:
         df_emp = pd.DataFrame(employees)
-        df_emp['Tenure'] = df_emp['start_date'].apply(calculate_tenure)
+        df_emp['Tenure'] = df_emp.apply(lambda r: format_tenure(r.get('tenure'), r['date_of_joining']), axis=1)
 
         # Build proposed data lookup
         proposed_map = {}
@@ -606,16 +732,28 @@ if menu == "📊 Dashboard Overview":
         with c_exp:
             df_export = df_emp.copy()
             df_export['Emp ID']          = df_export['id']
-            df_export['Start Date']      = df_export['start_date'].apply(format_display_date)
-            df_export['Joining Salary']  = df_export['joining_salary'].apply(format_currency)
-            df_export['Current Salary']  = df_export['current_salary'].apply(format_currency)
+            df_export['Role']            = df_export['role'].fillna('-')
+            df_export['Date of Joining'] = df_export['date_of_joining'].apply(format_display_date)
+            
+            eur_rate = get_eur_rate()
+            df_export['Joining Salary (INR)'] = df_export['joining_salary'].apply(format_currency_inr)
+            df_export['Joining Salary (EUR)'] = df_export['joining_salary'].apply(lambda x: format_eur(x, eur_rate))
+            df_export['Current Salary (INR)'] = df_export['current_salary'].apply(format_currency_inr)
+            df_export['Current Salary (EUR)'] = df_export['current_salary'].apply(lambda x: format_eur(x, eur_rate))
             df_export['Status']          = df_export['status']
-            export_cols = ['Emp ID', 'name', 'Start Date', 'Tenure', 'Joining Salary', 'Current Salary', 'Status']
+            
+            export_cols = ['Emp ID', 'name', 'Role', 'Date of Joining', 'Tenure', 
+                           'Joining Salary (INR)', 'Joining Salary (EUR)', 
+                           'Current Salary (INR)', 'Current Salary (EUR)', 'Status']
+            
             if has_proposed:
-                df_export['Proposed Increment'] = df_export['id'].apply(lambda i: format_currency(proposed_map[i]['increment_amount']) if i in proposed_map else '-')
+                df_export['Proposed Increment (INR)'] = df_export['id'].apply(lambda i: format_currency_inr(proposed_map[i]['increment_amount']) if i in proposed_map else '-')
+                df_export['Proposed Increment (EUR)'] = df_export['id'].apply(lambda i: format_eur(proposed_map[i]['increment_amount'], eur_rate) if i in proposed_map and pd.notna(proposed_map[i]['increment_amount']) else '-')
                 df_export['Proposed %']         = df_export['id'].apply(lambda i: format_percentage(proposed_map[i]['increment_percentage']) if i in proposed_map else '-')
-                df_export['New Salary (Proj)']  = df_export['id'].apply(lambda i: format_currency(proposed_map[i]['new_salary']) if i in proposed_map else '-')
-                export_cols += ['Proposed Increment', 'Proposed %', 'New Salary (Proj)']
+                df_export['New Salary (Proj) (INR)']  = df_export['id'].apply(lambda i: format_currency_inr(proposed_map[i]['new_salary']) if i in proposed_map else '-')
+                df_export['New Salary (Proj) (EUR)']  = df_export['id'].apply(lambda i: format_eur(proposed_map[i]['new_salary'], eur_rate) if i in proposed_map and pd.notna(proposed_map[i]['new_salary']) else '-')
+                export_cols += ['Proposed Increment (INR)', 'Proposed Increment (EUR)', 'Proposed %', 'New Salary (Proj) (INR)', 'New Salary (Proj) (EUR)']
+                
             df_final = df_export[export_cols].rename(columns={'name': 'Employee Name'})
             st.download_button(
                 label="📥 Export to XLSX",
@@ -633,7 +771,7 @@ if menu == "📊 Dashboard Overview":
 
         with hc0: st.markdown("**Emp ID**")
         with hc1: st.markdown("**Employee Name**")
-        with hc2: st.markdown("**Start Date / Tenure**")
+        with hc2: st.markdown("**DoJ / Tenure**")
         with hc3: st.markdown("**Joining<br>Salary**", unsafe_allow_html=True)
         with hc4: st.markdown("**Current<br>Salary**", unsafe_allow_html=True)
         with hc5: st.markdown("**Status**")
@@ -652,9 +790,12 @@ if menu == "📊 Dashboard Overview":
                 c0, c1, c2, c3, c4, c5 = st.columns([0.6, 2.2, 1.6, 2.2, 2.2, 1.2])
 
             with c0: st.write(row['id'])
-            with c1: st.write(row['name'])
+            with c1:
+                name_val = row['name']
+                role_val = row.get('role') or 'N/A'
+                st.markdown(f"<div style='font-weight:600;'>{name_val}</div><div style='font-size:0.85em; color:#64748b;'>{role_val}</div>", unsafe_allow_html=True)
             with c2:
-                s_date = format_display_date(row['start_date'])
+                s_date = format_display_date(row['date_of_joining'])
                 t_str = row['Tenure']
                 st.markdown(f"<div style='font-size:0.9em;'>{s_date}<br><span style='color:#64748b;'>{t_str}</span></div>", unsafe_allow_html=True)
             with c3: st.markdown(format_currency_html(row['joining_salary'], block=True), unsafe_allow_html=True)
@@ -687,14 +828,14 @@ elif menu == "📋 Employee Directory":
     if True:
         # Load all employees
         employees = execute_query("""
-            SELECT id, name, start_date, current_salary, status, department, resign_date 
+            SELECT id, name, date_of_joining, role, current_salary, status, department, resign_date, tenure 
             FROM employees 
             ORDER BY name ASC
         """)
         
         if employees:
             df_emp = pd.DataFrame(employees)
-            df_emp['Tenure'] = df_emp['start_date'].apply(calculate_tenure)
+            df_emp['Tenure'] = df_emp.apply(lambda r: format_tenure(r.get('tenure'), r['date_of_joining']), axis=1)
             df_emp['status'] = df_emp.apply(lambda r: 'Resigned' if pd.notna(r.get('resign_date')) and str(r.get('resign_date')).strip() else r['status'], axis=1)
             
             # Search & Filter bar
@@ -704,7 +845,7 @@ elif menu == "📋 Employee Directory":
             with col_s2:
                 status_filter = st.selectbox("Status:", ["All Statuses", "Active", "Resigned"])
             with col_s3:
-                sort_by = st.selectbox("Sort By:", ["Name (A-Z)", "Salary (High-Low)", "Start Date (Oldest-Newest)"])
+                sort_by = st.selectbox("Sort By:", ["Name (A-Z)", "Salary (High-Low)", "Date of Joining (Oldest-Newest)"])
                 
             # Apply filters
             df_filtered = df_emp.copy()
@@ -718,8 +859,8 @@ elif menu == "📋 Employee Directory":
                 df_filtered = df_filtered.sort_values(by='name')
             elif sort_by == "Salary (High-Low)":
                 df_filtered = df_filtered.sort_values(by='current_salary', ascending=False)
-            elif sort_by == "Start Date (Oldest-Newest)":
-                df_filtered = df_filtered.sort_values(by='start_date')
+            elif sort_by == "Date of Joining (Oldest-Newest)":
+                df_filtered = df_filtered.sort_values(by='date_of_joining')
                 
             # Stats below filter
             col_stat1, col_stat2 = st.columns([3, 1])
@@ -728,9 +869,15 @@ elif menu == "📋 Employee Directory":
             with col_stat2:
                 # generate export and place button
                 df_table = df_filtered.copy()
-                df_table['Joining Date (DoJ)'] = df_table['start_date'].apply(format_display_date)
-                df_table['Current Salary'] = df_table['current_salary'].apply(format_currency)
-                df_table_show = df_table[['id', 'name', 'Joining Date (DoJ)', 'Tenure', 'Current Salary', 'status']].rename(columns={'id': 'Emp ID', 'name': 'Employee Name', 'status': 'Status'})
+                df_table['Joining Date (DoJ)'] = df_table['date_of_joining'].apply(format_display_date)
+                
+                eur_rate = get_eur_rate()
+                df_table['Current Salary (INR)'] = df_table['current_salary'].apply(format_currency_inr)
+                df_table['Current Salary (EUR)'] = df_table['current_salary'].apply(lambda x: format_eur(x, eur_rate))
+                df_table['Role'] = df_table['role'].fillna('-')
+                df_table['Department'] = df_table['department'].fillna('-')
+                
+                df_table_show = df_table[['id', 'name', 'Role', 'Department', 'Joining Date (DoJ)', 'Tenure', 'Current Salary (INR)', 'Current Salary (EUR)', 'status']].rename(columns={'id': 'Emp ID', 'name': 'Employee Name', 'status': 'Status'})
                 st.download_button(label="📥 Export to XLSX", data=to_excel(df_table_show), file_name=f"employee_directory_{date.today()}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
             
             # Display Tab views: Table View vs Card View
@@ -740,10 +887,11 @@ elif menu == "📋 Employee Directory":
                 st.markdown("<div class='content-section'>", unsafe_allow_html=True)
                 
                 # Table Header
-                hcol_sr, hcol0, hcol1, hcol2, hcol3, hcol4, hcol5 = st.columns([0.5, 0.8, 2.5, 1.5, 1.5, 2.5, 1.5])
+                hcol_sr, hcol0, hcol1, hcol_role, hcol2, hcol3, hcol4, hcol5 = st.columns([0.5, 0.8, 2.0, 1.5, 1.5, 1.2, 2.0, 1.0])
                 with hcol_sr: st.markdown("**Sr No**")
                 with hcol0: st.markdown("**Emp ID**")
                 with hcol1: st.markdown("**Employee Name**")
+                with hcol_role: st.markdown("**Role**")
                 with hcol2: st.markdown("**DoJ**")
                 with hcol3: st.markdown("**Tenure**")
                 with hcol4: st.markdown("**Current<br>Salary**", unsafe_allow_html=True)
@@ -752,11 +900,12 @@ elif menu == "📋 Employee Directory":
                 
                 virtual_sr = 1
                 for idx, row in df_filtered.iterrows():
-                    col_sr, col0, col1, col2, col3, col4, col5 = st.columns([0.5, 0.8, 2.5, 1.5, 1.5, 2.5, 1.5])
+                    col_sr, col0, col1, col_role, col2, col3, col4, col5 = st.columns([0.5, 0.8, 2.0, 1.5, 1.5, 1.2, 2.0, 1.0])
                     with col_sr: st.write(virtual_sr)
                     with col0: st.write(row['id'])
                     with col1: st.write(row['name'])
-                    with col2: st.write(format_display_date(row['start_date']))
+                    with col_role: st.write(row.get('role') or 'N/A')
+                    with col2: st.write(format_display_date(row['date_of_joining']))
                     with col3: st.write(row['Tenure'])
                     with col4: st.markdown(format_currency_html(row['current_salary'], block=True), unsafe_allow_html=True)
                     with col5: st.write(row['status'])
@@ -774,9 +923,9 @@ elif menu == "📋 Employee Directory":
                         st.markdown(
                             f"<div class='kpi-card' style='position: relative; margin-bottom: 5px;'>"
                             f"<div style='font-size:18px; font-weight:700; color:#0f172a;'>{row['name']}</div>"
-                            f"<div style='font-size:12px; font-weight:500; color:#64748b; margin-top:2px;'>ID: {row['id']} | Department: {row['department'] or 'Tech'}</div>"
+                            f"<div style='font-size:12px; font-weight:500; color:#64748b; margin-top:2px;'>ID: {row['id']} | Role: {row.get('role') or 'N/A'} | Department: {row['department'] or 'Tech'}</div>"
                             f"<hr style='margin:10px 0; border:0; border-top:1px solid #f1f5f9;'/>"
-                            f"<div style='font-size:13px; color:#475569;'><b>DoJ:</b> {format_display_date(row['start_date'])}</div>"
+                            f"<div style='font-size:13px; color:#475569;'><b>DoJ:</b> {format_display_date(row['date_of_joining'])}</div>"
                             f"<div style='font-size:13px; color:#475569;'><b>Tenure:</b> {row['Tenure']}</div>"
                             f"<div style='font-size:13px; color:#475569; margin-top:4px;'><b>Salary:</b> {format_currency_html(row['current_salary'], block=False)}</div>"
                             f"<div style='margin-top:12px; text-align:right;'>"
@@ -835,10 +984,17 @@ elif menu == "📜 Review History":
                 c4, c5, c6 = st.columns(3)
                 with c4:
                     edit_prev_sal = st.number_input("Previous Salary (₹):", min_value=0.0, value=float(rev_data['previous_salary'] or 0), step=5000.0)
+                    if edit_prev_sal > 0:
+                        st.caption(f"💶 **EUR:** {format_eur(edit_prev_sal, get_eur_rate())} | ✍️ {num_to_words_indian(edit_prev_sal)}")
                 with c5:
                     edit_inc_amt = st.number_input("Increment Amount (₹):", value=float(rev_data['increment_amount'] or 0), step=1000.0)
+                    if edit_inc_amt > 0:
+                        st.caption(f"💶 **EUR:** {format_eur(edit_inc_amt, get_eur_rate())} | ✍️ {num_to_words_indian(edit_inc_amt)}")
                 with c6:
-                    edit_new_sal = st.number_input("New Salary (₹) - auto calculated", value=float(rev_data['new_salary'] or 0), disabled=True)
+                    calc_new_sal = edit_prev_sal + edit_inc_amt
+                    st.number_input("New Salary (₹) - auto calculated", value=float(calc_new_sal), disabled=True)
+                    if calc_new_sal > 0:
+                        st.caption(f"💶 **EUR:** {format_eur(calc_new_sal, get_eur_rate())} | ✍️ {num_to_words_indian(calc_new_sal)}")
                     
                 c7, c8, c9 = st.columns(3)
                 with c7:
@@ -872,7 +1028,7 @@ elif menu == "📜 Review History":
     render_header("Salary Review History Log", "S-4")
     # Load all reviews — include review id for edit button
     reviews_all = execute_query("""
-        SELECT r.id as review_id, e.id as emp_id, e.name, r.review_name, r.review_date, r.previous_salary, r.increment_amount, r.increment_percentage, r.new_salary, r.effective_date, r.remark, r.status, r.sr_no
+        SELECT r.id as review_id, e.id as emp_id, e.name, e.date_of_joining, e.role, r.review_name, r.review_date, r.previous_salary, r.increment_amount, r.increment_percentage, r.new_salary, r.effective_date, r.remark, r.status, r.sr_no
         FROM salary_reviews r
         JOIN employees e ON r.employee_id = e.id
         ORDER BY r.effective_date DESC, r.id DESC
@@ -987,18 +1143,30 @@ elif menu == "📜 Review History":
                 st.session_state.next_page = "📈 Record New Review"
                 st.rerun()
         with col_stat3:
-            active_emps = execute_query("SELECT id as 'Emp ID', name as 'Employee Name', current_salary as 'Previous Salary' FROM employees WHERE status='Active'")
+            active_emps = execute_query("SELECT id as 'Emp ID', name as 'Employee Name', role as 'Role', date_of_joining as 'Date of Joining', current_salary as 'Previous Salary' FROM employees WHERE status='Active'")
             if active_emps:
+                eur_rate = get_eur_rate()
                 df_tmpl = pd.DataFrame(active_emps)
                 df_tmpl.insert(0, 'Sr No', '')
+                df_tmpl['Date of Joining'] = df_tmpl['Date of Joining'].apply(format_display_date)
+                df_tmpl['Role'] = df_tmpl['Role'].fillna('-')
+                
+                df_tmpl['Previous Salary (INR)'] = df_tmpl['Previous Salary'].apply(format_currency_inr)
+                df_tmpl['Previous Salary (EUR)'] = df_tmpl['Previous Salary'].apply(lambda x: format_eur(x, eur_rate))
+                
                 df_tmpl['Review Label'] = ''
                 df_tmpl['Review Date'] = ''
                 df_tmpl['Effective Date'] = ''
-                df_tmpl['Increment Amount'] = ''
-                df_tmpl['New Salary'] = ''
+                df_tmpl['Increment Amount (INR)'] = ''
+                df_tmpl['Increment Amount (EUR)'] = ''
+                df_tmpl['New Salary (INR)'] = ''
+                df_tmpl['New Salary (EUR)'] = ''
                 df_tmpl['Status'] = 'Proposed'
                 df_tmpl['Remark'] = ''
-                df_tmpl = df_tmpl[['Sr No', 'Emp ID', 'Employee Name', 'Review Label', 'Review Date', 'Effective Date', 'Previous Salary', 'Increment Amount', 'New Salary', 'Status', 'Remark']]
+                
+                df_tmpl = df_tmpl[['Sr No', 'Emp ID', 'Employee Name', 'Role', 'Date of Joining', 'Review Label', 'Review Date', 'Effective Date', 
+                                   'Previous Salary (INR)', 'Previous Salary (EUR)', 'Increment Amount (INR)', 'Increment Amount (EUR)', 
+                                   'New Salary (INR)', 'New Salary (EUR)', 'Status', 'Remark']]
                 st.download_button("📥 Export Template", data=to_excel(df_tmpl), file_name="review_import_template.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
                 
         with col_stat4:
@@ -1011,6 +1179,9 @@ elif menu == "📜 Review History":
             
             df_export['Sr No']           = range(1, len(df_export) + 1)
             df_export['Rev Sr']          = df_export['sr_no']
+            
+            df_export['Role']            = df_export['role'].fillna('-')
+            df_export['Date of Joining'] = df_export['date_of_joining'].apply(format_display_date)
             
             df_export['Previous Salary\n(INR)'] = df_export['previous_salary']
             df_export['Previous Salary\n(EUR)'] = df_export['previous_salary'].apply(lambda x: int(round(x / eur_rate)) if eur_rate > 0 and pd.notna(x) else None).astype('Int64')
@@ -1026,7 +1197,7 @@ elif menu == "📜 Review History":
             df_export['Status']          = df_export['status']
             df_export['Remark']          = df_export['remark'].fillna('-')
             
-            export_cols = ['Sr No', 'emp_id', 'Rev Sr', 'name', 'review_name', 'Review Date', 'Effective Date',
+            export_cols = ['Sr No', 'emp_id', 'Rev Sr', 'name', 'Role', 'Date of Joining', 'review_name', 'Review Date', 'Effective Date',
                            'Previous Salary\n(INR)', 'Previous Salary\n(EUR)', 'Increment\n(INR)', 'Increment\n(EUR)',
                            'Increment %', 'New Salary\n(INR)', 'New Salary\n(EUR)', 'Status', 'Remark']
                            
@@ -1062,9 +1233,17 @@ elif menu == "📜 Review History":
                                 r_date = parse_import_date(row.get('Review Date'))
                                 e_date = parse_import_date(row.get('Effective Date'))
                                 
-                                prev_sal = float(row.get('Previous Salary', 0)) if pd.notna(row.get('Previous Salary')) else 0.0
-                                inc_amt = float(row.get('Increment Amount', 0)) if pd.notna(row.get('Increment Amount')) else 0.0
-                                new_sal = float(row.get('New Salary', 0)) if pd.notna(row.get('New Salary')) else prev_sal + inc_amt
+                                # Helper to get from multiple potential columns
+                                def get_col_val(r, cols, default=0.0):
+                                    for c in cols:
+                                        if c in r and pd.notna(r[c]):
+                                            try: return float(r[c])
+                                            except: pass
+                                    return default
+
+                                prev_sal = get_col_val(row, ['Previous Salary', 'Previous Salary (INR)', 'Previous Salary\n(INR)', 'Previous Salary (EUR)', 'Previous Salary\n(EUR)'], 0.0)
+                                inc_amt = get_col_val(row, ['Increment Amount', 'Increment Amount (INR)', 'Increment Amount\n(INR)', 'Increment (INR)', 'Increment\n(INR)', 'Increment Amount (EUR)', 'Increment Amount\n(EUR)', 'Increment (EUR)', 'Increment\n(EUR)'], 0.0)
+                                new_sal = get_col_val(row, ['New Salary', 'New Salary (INR)', 'New Salary\n(INR)', 'New Salary (EUR)', 'New Salary\n(EUR)'], prev_sal + inc_amt)
                                 
                                 sr_no = int(row.get('Sr No')) if 'Sr No' in row and pd.notna(row.get('Sr No')) else None
                                 label = str(row.get('Review Label', '')) if pd.notna(row.get('Review Label')) else ''
@@ -1163,6 +1342,9 @@ elif menu == "👤 Employee Profiles":
         # Load employee info
         emp_info = execute_query("SELECT * FROM employees WHERE id = ?", (selected_emp_id,))[0]
         
+        # Display Department and Role
+        st.markdown(f"<div style='font-size: 15px; color: #475569; margin-bottom: 15px;'><b>Department:</b> {emp_info['department'] or 'Tech'} | <b>Role:</b> {emp_info['role'] or 'N/A'}</div>", unsafe_allow_html=True)
+
         # Display details in cards
         col1, col2, col3, col4 = st.columns(4)
         
@@ -1171,7 +1353,7 @@ elif menu == "👤 Employee Profiles":
                 f"<div class='kpi-card'>"
                 f"<div class='kpi-title'>Employment Status</div>"
                 f"<div class='kpi-value' style='color:{'#10b981' if emp_info['status'] == 'Active' else '#f43f5e'}'>{emp_info['status']}</div>"
-                f"<div class='kpi-sub-neutral'>Tenure: {calculate_tenure(emp_info['start_date'])}</div>"
+                f"<div class='kpi-sub-neutral'>Tenure: {format_tenure(emp_info.get('tenure'), emp_info['date_of_joining'])}</div>"
                 f"</div>",
                 unsafe_allow_html=True
             )
@@ -1179,8 +1361,8 @@ elif menu == "👤 Employee Profiles":
         with col2:
             st.markdown(
                 f"<div class='kpi-card'>"
-                f"<div class='kpi-title'>Start Date</div>"
-                f"<div class='kpi-value' style='font-size:22px;'>{format_display_date(emp_info['start_date'])}</div>"
+                f"<div class='kpi-title'>Date of Joining (DoJ)</div>"
+                f"<div class='kpi-value' style='font-size:22px;'>{format_display_date(emp_info['date_of_joining'])}</div>"
                 f"<div class='kpi-sub-neutral'>Joining Date</div>"
                 f"</div>",
                 unsafe_allow_html=True
@@ -1229,9 +1411,9 @@ elif menu == "👤 Employee Profiles":
             chart_points = []
             
             # Add joining salary point
-            if emp_info['joining_salary'] is not None and emp_info['start_date'] is not None:
+            if emp_info['joining_salary'] is not None and emp_info['date_of_joining'] is not None:
                 chart_points.append({
-                    'Date': emp_info['start_date'],
+                    'Date': emp_info['date_of_joining'],
                     'Salary': emp_info['joining_salary'],
                     'Event': 'Joining Salary',
                     'Status': 'Finalized'
@@ -1239,7 +1421,7 @@ elif menu == "👤 Employee Profiles":
                 
             for rev in reviews:
                 # Use effective date or review date
-                rev_date = rev['effective_date'] or rev['review_date'] or emp_info['start_date']
+                rev_date = rev['effective_date'] or rev['review_date'] or emp_info['date_of_joining']
                 
                 # Make sure we don't have None values for plot
                 if rev['new_salary'] is not None:
@@ -1313,7 +1495,26 @@ elif menu == "👤 Employee Profiles":
             
             st.dataframe(df_revs_display, use_container_width=True, hide_index=True)
             
-            excel_data = to_excel(df_revs_display)
+            # Export DataFrame with Date of Joining, Role, and EUR columns next to INR columns
+            eur_rate = get_eur_rate()
+            df_export = pd.DataFrame()
+            df_export['Employee Name'] = [selected_emp_name] * len(df_revs)
+            df_export['Role'] = [emp_info['role'] or 'N/A'] * len(df_revs)
+            df_export['Date of Joining'] = [format_display_date(emp_info['date_of_joining'])] * len(df_revs)
+            df_export['Review Name'] = df_revs['review_name']
+            df_export['Review Date'] = df_revs['review_date'].apply(format_display_date)
+            df_export['Effective Date'] = df_revs['effective_date'].apply(format_display_date)
+            df_export['Previous Salary (INR)'] = df_revs['previous_salary'].apply(format_currency_inr)
+            df_export['Previous Salary (EUR)'] = df_revs['previous_salary'].apply(lambda x: format_eur(x, eur_rate))
+            df_export['Increment (INR)'] = df_revs['increment_amount'].apply(format_currency_inr)
+            df_export['Increment (EUR)'] = df_revs['increment_amount'].apply(lambda x: format_eur(x, eur_rate))
+            df_export['Increment %'] = df_revs['increment_percentage'].apply(format_percentage)
+            df_export['New Salary (INR)'] = df_revs['new_salary'].apply(format_currency_inr)
+            df_export['New Salary (EUR)'] = df_revs['new_salary'].apply(lambda x: format_eur(x, eur_rate))
+            df_export['Status'] = df_revs['status']
+            df_export['Remark'] = df_revs['remark'].fillna('-')
+            
+            excel_data = to_excel(df_export)
             st.download_button(
                 label=f"📥 Export {selected_emp_name}'s History to Excel",
                 data=excel_data,
@@ -1444,7 +1645,7 @@ elif menu == "📈 Record New Review":
             
         st.markdown("<div class='content-section'>", unsafe_allow_html=True)
         recent_reviews = execute_query("""
-            SELECT e.id as emp_id, e.name, r.review_name, r.review_date, r.previous_salary, r.increment_amount, r.new_salary, r.status
+            SELECT e.id as emp_id, e.name, e.date_of_joining, e.role, r.review_name, r.review_date, r.previous_salary, r.increment_amount, r.new_salary, r.status
             FROM salary_reviews r
             JOIN employees e ON r.employee_id = e.id
             ORDER BY r.id DESC LIMIT 10
@@ -1455,15 +1656,23 @@ elif menu == "📈 Record New Review":
         with col_sec_exp:
             if recent_reviews:
                 df_rec = pd.DataFrame(recent_reviews)
+                eur_rate = get_eur_rate()
                 df_rec_display = pd.DataFrame()
                 df_rec_display['Emp ID'] = df_rec['emp_id']
                 df_rec_display['Employee Name'] = df_rec['name']
+                df_rec_display['Role'] = df_rec['role'].fillna('-')
+                df_rec_display['Date of Joining'] = df_rec['date_of_joining'].apply(format_display_date)
                 df_rec_display['Review Name'] = df_rec['review_name']
                 df_rec_display['Date'] = df_rec['review_date'].apply(format_display_date)
-                df_rec_display['Previous Salary'] = df_rec['previous_salary'].apply(format_currency)
-                df_rec_display['Increment'] = df_rec['increment_amount'].apply(format_currency)
-                df_rec_display['New Salary'] = df_rec['new_salary'].apply(format_currency)
+                
+                df_rec_display['Previous Salary (INR)'] = df_rec['previous_salary'].apply(format_currency_inr)
+                df_rec_display['Previous Salary (EUR)'] = df_rec['previous_salary'].apply(lambda x: format_eur(x, eur_rate))
+                df_rec_display['Increment (INR)'] = df_rec['increment_amount'].apply(format_currency_inr)
+                df_rec_display['Increment (EUR)'] = df_rec['increment_amount'].apply(lambda x: format_eur(x, eur_rate))
+                df_rec_display['New Salary (INR)'] = df_rec['new_salary'].apply(format_currency_inr)
+                df_rec_display['New Salary (EUR)'] = df_rec['new_salary'].apply(lambda x: format_eur(x, eur_rate))
                 df_rec_display['Status'] = df_rec['status']
+                
                 st.download_button(
                     label="📥 Export to XLSX",
                     data=to_excel(df_rec_display),
@@ -1503,7 +1712,7 @@ elif menu == "📈 Record New Review":
         
         col1, col2 = st.columns(2)
         with col1:
-            review_name = st.text_input("Review Label / Name:", value="Review-27", placeholder="e.g. Review-27, Aug-25 Review", key=f"rev_name_{emp_id}")
+            review_name = st.text_input("Review Label / Name:", value="Review-26", placeholder="e.g. Review-26, Aug-25 Review", key=f"rev_name_{emp_id}")
             review_date = st.date_input("Review Date (Date of decision):", value=date.today(), key=f"rev_date_{emp_id}", format="DD-MM-YYYY")
             effective_date = st.date_input("Effective Date (Date salary takes effect):", value=date.today(), key=f"eff_date_{emp_id}", format="DD-MM-YYYY")
         
@@ -1511,14 +1720,18 @@ elif menu == "📈 Record New Review":
             inc_type = st.radio("Increment Input Type:", ["Absolute Value", "Percentage Increase"], key=f"inc_type_{emp_id}")
             if inc_type == "Absolute Value":
                 inc_amt = st.number_input("Increment Amount (₹):", min_value=0.0, step=5000.0, value=50000.0, key=f"inc_amt_{emp_id}")
+                if inc_amt > 0:
+                    st.caption(f"💶 **EUR:** {format_eur(inc_amt, get_eur_rate())} | ✍️ {num_to_words_indian(inc_amt)}")
                 inc_pct = (inc_amt / cur_sal * 100.0) if cur_sal > 0 else 0.0
             else:
                 inc_pct = st.number_input("Increment Percentage (%):", min_value=0.0, max_value=200.0, step=0.5, value=5.0, key=f"inc_pct_{emp_id}")
                 inc_amt = (inc_pct / 100.0) * cur_sal
+                if inc_amt > 0:
+                    st.caption(f"💶 **EUR Equivalent:** {format_eur(inc_amt, get_eur_rate())} | ✍️ {num_to_words_indian(inc_amt)}")
             
-            st.write(f"Calculated Increment Amount: **{format_currency(inc_amt)}**")
+            st.write(f"Calculated Increment Amount: **{format_currency(inc_amt)}** (In Words: {num_to_words_indian(inc_amt)})")
             st.write(f"Calculated Increment Percentage: **{inc_pct:.2f}%**")
-            st.write(f"Resulting Salary: **{format_currency(cur_sal + inc_amt)}**")
+            st.write(f"Resulting Salary: **{format_currency(cur_sal + inc_amt)}** (In Words: {num_to_words_indian(cur_sal + inc_amt)})")
             
         remark = st.text_area("Remarks / Notes:", placeholder="Add review feedback, offer letter details, etc.", key=f"remark_{emp_id}")
         status_opt = st.radio("Status of this review:", ["Proposed (Draft for planner)", "Finalized (Apply to current salary immediately)"], horizontal=True, key=f"status_{emp_id}")
@@ -1565,15 +1778,15 @@ elif menu == "📈 Record New Review":
         st.markdown("</div>", unsafe_allow_html=True)
 
 
-# --- REVIEW PLANNER PAGE (Review-27) ---
-elif menu == "📅 Review Planner (Review-27)":
+# --- REVIEW PLANNER PAGE (Review-26) ---
+elif menu == "📅 Review Planner (Review-26)":
     if 'selected_review_to_edit' not in st.session_state:
         st.session_state.selected_review_to_edit = None
         
     if st.session_state.selected_review_to_edit is None:
-        render_header("Salary Review Planner (Review-27)", "S-6")
+        render_header("Salary Review Planner (Review-26)", "S-6")
     else:
-        render_header("Salary Review Planner (Review-27)", "S-10")
+        render_header("Salary Review Planner (Review-26)", "S-10")
     
     st.markdown(
         "<div style='background-color:#eff6ff; border: 1px solid #bfdbfe; border-radius:12px; padding:15px; margin-bottom:20px; color:#1e40af; font-size:14px;'>"
@@ -1585,7 +1798,7 @@ elif menu == "📅 Review Planner (Review-27)":
     
     # Load all proposed reviews
     proposed_reviews = execute_query("""
-        SELECT r.id as review_id, e.id as emp_id, e.name, e.current_salary as live_salary, r.previous_salary, r.increment_amount, r.increment_percentage, r.new_salary, r.review_date, r.effective_date, r.remark 
+        SELECT r.id as review_id, e.id as emp_id, e.name, e.date_of_joining, e.role, e.current_salary as live_salary, r.previous_salary, r.increment_amount, r.increment_percentage, r.new_salary, r.review_date, r.effective_date, r.remark 
         FROM salary_reviews r
         JOIN employees e ON r.employee_id = e.id
         WHERE r.status = 'Proposed'
@@ -1614,12 +1827,23 @@ elif menu == "📅 Review Planner (Review-27)":
             with c_title:
                 st.markdown("<div class='section-title'>Proposed Reviews List</div>", unsafe_allow_html=True)
             with c_exp:
+                eur_rate = get_eur_rate()
                 df_export = df_prop.copy()
-                df_export['Previous Salary'] = df_export['previous_salary'].apply(format_currency)
-                df_export['Increment'] = df_export['increment_amount'].apply(format_currency)
+                df_export['Role'] = df_export['role'].fillna('-')
+                df_export['Date of Joining'] = df_export['date_of_joining'].apply(format_display_date)
+                
+                df_export['Previous Salary (INR)'] = df_export['previous_salary'].apply(format_currency_inr)
+                df_export['Previous Salary (EUR)'] = df_export['previous_salary'].apply(lambda x: format_eur(x, eur_rate))
+                df_export['Increment (INR)'] = df_export['increment_amount'].apply(format_currency_inr)
+                df_export['Increment (EUR)'] = df_export['increment_amount'].apply(lambda x: format_eur(x, eur_rate))
                 df_export['Increment %'] = df_export['increment_percentage'].apply(format_percentage)
-                df_export['New Salary'] = df_export['new_salary'].apply(format_currency)
-                df_export = df_export[['emp_id', 'name', 'Previous Salary', 'Increment', 'Increment %', 'New Salary']].rename(columns={'emp_id': 'Emp ID', 'name': 'Employee Name'})
+                df_export['New Salary (INR)'] = df_export['new_salary'].apply(format_currency_inr)
+                df_export['New Salary (EUR)'] = df_export['new_salary'].apply(lambda x: format_eur(x, eur_rate))
+                
+                df_export = df_export[['emp_id', 'name', 'Role', 'Date of Joining', 
+                                       'Previous Salary (INR)', 'Previous Salary (EUR)', 
+                                       'Increment (INR)', 'Increment (EUR)', 'Increment %', 
+                                       'New Salary (INR)', 'New Salary (EUR)']].rename(columns={'emp_id': 'Emp ID', 'name': 'Employee Name'})
                 st.download_button(
                     label="📥 Export to XLSX",
                     data=to_excel(df_export),
@@ -1710,6 +1934,8 @@ elif menu == "📅 Review Planner (Review-27)":
                 col_edit1, col_edit2 = st.columns(2)
                 with col_edit1:
                     edit_inc = st.number_input("Adjust Increment Amount (₹):", min_value=0.0, value=float(row_selected['increment_amount']), step=5000.0)
+                    if edit_inc > 0:
+                        st.caption(f"💶 **EUR:** {format_eur(edit_inc, get_eur_rate())} | ✍️ {num_to_words_indian(edit_inc)}")
                     edit_eff = st.date_input("Adjust Effective Date:", value=datetime.strptime(row_selected['effective_date'], "%Y-%m-%d").date() if row_selected['effective_date'] else date.today(), format="DD-MM-YYYY")
                 with col_edit2:
                     edit_rem = st.text_area("Adjust Remark:", value=str(row_selected['remark'] or ""))
@@ -1761,8 +1987,11 @@ elif menu == "⚙️ Manage Employees":
         with st.form("add_employee_form"):
             new_name = st.text_input("Full Name:", placeholder="First Last")
             new_dept = st.text_input("Department:", value="Tech")
-            new_start = st.date_input("Start Date:", value=date.today(), format="DD-MM-YYYY")
+            new_role = st.text_input("Role:", placeholder="e.g. Developer, Designer")
+            new_start = st.date_input("Date of Joining (DoJ):", value=date.today(), format="DD-MM-YYYY")
             new_sal = st.number_input("Joining Base Salary (₹):", min_value=0.0, step=10000.0, value=500000.0)
+            if new_sal > 0:
+                st.caption(f"💶 **EUR Equivalent:** {format_eur(new_sal, get_eur_rate())} | ✍️ **In Words:** {num_to_words_indian(new_sal)}")
             
             add_submit = st.form_submit_button("Register Employee", type="primary")
             
@@ -1771,9 +2000,9 @@ elif menu == "⚙️ Manage Employees":
                     st.error("Employee Name is required!")
                 else:
                     res = execute_query("""
-                        INSERT OR IGNORE INTO employees (name, department, start_date, joining_salary, current_salary, status)
-                        VALUES (?, ?, ?, ?, ?, 'Active')
-                    """, (new_name.strip(), new_dept.strip(), new_start.strftime("%Y-%m-%d"), new_sal, new_sal), commit=True)
+                        INSERT OR IGNORE INTO employees (name, department, date_of_joining, role, joining_salary, current_salary, status)
+                        VALUES (?, ?, ?, ?, ?, ?, 'Active')
+                    """, (new_name.strip(), new_dept.strip(), new_start.strftime("%Y-%m-%d"), new_role.strip() if new_role.strip() else None, new_sal, new_sal), commit=True)
                     
                     if res:
                         st.success(f"Registered {new_name} successfully!")
@@ -1787,7 +2016,7 @@ elif menu == "⚙️ Manage Employees":
         render_header("Edit Employee Details", "S-11")
         edit_id = st.session_state.manage_emp_action
         emp_rows = execute_query("""
-            SELECT id, name, department, start_date, joining_salary, current_salary, status, last_review_date, last_review_effective_date, resign_date, lwd
+            SELECT id, name, department, role, date_of_joining, joining_salary, current_salary, status, last_review_date, last_review_effective_date, resign_date, lwd
             FROM employees
             WHERE id = ?
         """, (edit_id,))
@@ -1821,26 +2050,32 @@ elif menu == "⚙️ Manage Employees":
                 st.session_state[lwd_key] = datetime.strptime(emp_data['lwd'], "%Y-%m-%d").date() if emp_data.get('lwd') else None
 
             with st.form("manage_employee_full_page_edit"):
-                r1c1, r1c2, r1c3 = st.columns(3)
+                r1c1, r1c2, r1c_role, r1c3 = st.columns(4)
                 with r1c1:
                     edit_name = st.text_input("Full Name:", value=emp_data['name'] or "")
                 with r1c2:
                     edit_dept = st.text_input("Department:", value=clean_employee_text(emp_data['department'], ""))
+                with r1c_role:
+                    edit_role = st.text_input("Role:", value=clean_employee_text(emp_data.get('role'), ""))
                 with r1c3:
                     edit_status = st.selectbox("Status:", ["Active", "Resigned"],
                         index=0 if emp_data['status'] == 'Active' else 1)
 
                 r2c1, r2c2, r2c3 = st.columns(3)
                 with r2c1:
-                    edit_start = st.date_input("Start Date:",
-                        value=datetime.strptime(emp_data['start_date'], "%Y-%m-%d").date() if emp_data['start_date'] else date.today(),
+                    edit_start = st.date_input("Date of Joining (DoJ):",
+                        value=datetime.strptime(emp_data['date_of_joining'], "%Y-%m-%d").date() if emp_data['date_of_joining'] else date.today(),
                         format="DD-MM-YYYY")
                 with r2c2:
                     edit_joining_salary = st.number_input("Joining Salary (₹):", min_value=0.0, step=10000.0,
                         value=float(emp_data['joining_salary'] or 0))
+                    if edit_joining_salary > 0:
+                        st.caption(f"💶 **EUR:** {format_eur(edit_joining_salary, get_eur_rate())} | ✍️ {num_to_words_indian(edit_joining_salary)}")
                 with r2c3:
                     edit_current_salary = st.number_input("Current Salary (₹):", min_value=0.0, step=10000.0,
                         value=float(emp_data['current_salary'] or 0))
+                    if edit_current_salary > 0:
+                        st.caption(f"💶 **EUR:** {format_eur(edit_current_salary, get_eur_rate())} | ✍️ {num_to_words_indian(edit_current_salary)}")
 
                 r3c1, r3c2, r3c3 = st.columns(3)
                 with r3c1:
@@ -1866,11 +2101,12 @@ elif menu == "⚙️ Manage Employees":
                     else:
                         execute_query("""
                             UPDATE employees
-                            SET name = ?, department = ?, start_date = ?, joining_salary = ?, current_salary = ?, status = ?, last_review_date = ?, last_review_effective_date = ?, resign_date = ?, lwd = ?
+                            SET name = ?, department = ?, role = ?, date_of_joining = ?, joining_salary = ?, current_salary = ?, status = ?, last_review_date = ?, last_review_effective_date = ?, resign_date = ?, lwd = ?
                             WHERE id = ?
                         """, (
                             edit_name.strip(),
                             edit_dept.strip(),
+                            edit_role.strip() if edit_role.strip() else None,
                             edit_start.strftime("%Y-%m-%d"),
                             edit_joining_salary,
                             edit_current_salary,
@@ -1900,7 +2136,7 @@ elif menu == "⚙️ Manage Employees":
         st.markdown("<div class='section-title'>Employee Table</div>", unsafe_allow_html=True)
         
         all_emps = execute_query("""
-            SELECT id, name, department, start_date, joining_salary, current_salary, status, last_review_date, last_review_effective_date, resign_date, lwd
+            SELECT id, name, department, role, date_of_joining, joining_salary, current_salary, status, last_review_date, last_review_effective_date, resign_date, lwd
             FROM employees
             ORDER BY name ASC
         """)
@@ -1908,7 +2144,7 @@ elif menu == "⚙️ Manage Employees":
             df_manage = pd.DataFrame(all_emps)
             search_col, status_col = st.columns([2, 1])
             with search_col:
-                search_text = st.text_input("Search employee:", placeholder="Type a name or department")
+                search_text = st.text_input("Search employee:", placeholder="Type a name, department or role")
             with status_col:
                 status_filter = st.selectbox("Status:", ["All", "Active", "Resigned"])
             
@@ -1917,6 +2153,7 @@ elif menu == "⚙️ Manage Employees":
                 df_manage = df_manage[
                     df_manage['name'].fillna("").str.lower().str.contains(needle)
                     | df_manage['department'].fillna("").str.lower().str.contains(needle)
+                    | df_manage['role'].fillna("").str.lower().str.contains(needle)
                 ]
             if status_filter != "All":
                 df_manage = df_manage[df_manage['status'] == status_filter]
@@ -1925,15 +2162,29 @@ elif menu == "⚙️ Manage Employees":
             with col_stat1:
                 st.write(f"Showing **{len(df_manage)}** employees.")
             with col_stat2:
+                eur_rate = get_eur_rate()
                 df_export = df_manage.copy()
-                df_export['start_date'] = df_export['start_date'].apply(format_display_date)
-                df_export['joining_salary'] = df_export['joining_salary'].apply(format_currency)
-                df_export['current_salary'] = df_export['current_salary'].apply(format_currency)
+                df_export['date_of_joining'] = df_export['date_of_joining'].apply(format_display_date)
+                df_export['joining_salary_inr'] = df_export['joining_salary'].apply(format_currency_inr)
+                df_export['joining_salary_eur'] = df_export['joining_salary'].apply(lambda x: format_eur(x, eur_rate))
+                df_export['current_salary_inr'] = df_export['current_salary'].apply(format_currency_inr)
+                df_export['current_salary_eur'] = df_export['current_salary'].apply(lambda x: format_eur(x, eur_rate))
                 df_export['last_review_date'] = df_export['last_review_date'].apply(format_display_date)
                 df_export['last_review_effective_date'] = df_export['last_review_effective_date'].apply(format_display_date)
                 df_export['resign_date'] = df_export['resign_date'].apply(format_display_date)
                 df_export['lwd'] = df_export['lwd'].apply(format_display_date)
-                df_export = df_export.rename(columns={'id': 'Emp ID', 'name': 'Employee Name'})
+                df_export = df_export.rename(columns={
+                    'id': 'Emp ID', 'name': 'Employee Name', 'department': 'Department',
+                    'role': 'Role', 'date_of_joining': 'Date of Joining',
+                    'joining_salary_inr': 'Joining Salary (INR)', 'joining_salary_eur': 'Joining Salary (EUR)',
+                    'current_salary_inr': 'Current Salary (INR)', 'current_salary_eur': 'Current Salary (EUR)',
+                    'status': 'Status', 'last_review_date': 'Last Review Date',
+                    'last_review_effective_date': 'Last Review Effective Date',
+                    'resign_date': 'Resigned Date', 'lwd': 'Last Working Day'
+                })
+                df_export = df_export[['Emp ID', 'Employee Name', 'Department', 'Role', 'Date of Joining', 
+                                       'Joining Salary (INR)', 'Joining Salary (EUR)', 'Current Salary (INR)', 'Current Salary (EUR)', 
+                                       'Status', 'Last Review Date', 'Last Review Effective Date', 'Resigned Date', 'Last Working Day']]
                 st.download_button(
                     label="📥 Export to XLSX",
                     data=to_excel(df_export),
@@ -1947,7 +2198,7 @@ elif menu == "⚙️ Manage Employees":
             with hcol1: st.markdown("**ID**")
             with hcol2: st.markdown("**Name**")
             with hcol3: st.markdown("**Dept**")
-            with hcol4: st.markdown("**Start Date**")
+            with hcol4: st.markdown("**DoJ**")
             with hcol5: st.markdown("**Join Sal**")
             with hcol6: st.markdown("**Cur Sal**")
             with hcol7: st.markdown("**Last Rev/Eff**")
@@ -1962,9 +2213,12 @@ elif menu == "⚙️ Manage Employees":
                 col0, col1, col2, col3, col4, col5, col6, col7, col8, col9, col10, col11 = st.columns([0.4, 0.4, 1.5, 1.0, 1.0, 1.0, 1.0, 1.2, 1.0, 1.0, 0.8, 0.8])
                 with col0: st.write(virtual_sr)
                 with col1: st.write(row['id'])
-                with col2: st.write(row['name'])
+                with col2:
+                    name_val = row['name']
+                    role_val = row.get('role') or 'N/A'
+                    st.markdown(f"<div style='font-weight:600;'>{name_val}</div><div style='font-size:0.85em; color:#64748b;'>{role_val}</div>", unsafe_allow_html=True)
                 with col3: st.write(clean_employee_text(row['department']))
-                with col4: st.write(format_display_date(row['start_date']))
+                with col4: st.write(format_display_date(row['date_of_joining']))
                 with col5: st.markdown(format_currency_html(row['joining_salary'], block=True), unsafe_allow_html=True)
                 with col6: st.markdown(format_currency_html(row['current_salary'], block=True), unsafe_allow_html=True)
                 with col7:
@@ -2049,6 +2303,8 @@ elif menu == "🎁 Bonuses":
             with col1:
                 sel_emp_name = st.selectbox("Employee:", list(emp_options.keys()), index=emp_idx)
                 amt = st.number_input("Bonus Amount (₹):", min_value=0.0, value=def_amount, step=10000.0)
+                if amt > 0:
+                    st.caption(f"💶 **EUR Equivalent:** {format_eur(amt, get_eur_rate())} | ✍️ **In Words:** {num_to_words_indian(amt)}")
             with col2:
                 date_dec = st.date_input("Date Declared:", value=def_date_dec, format="DD-MM-YYYY")
                 date_due = st.date_input("Due Date:", value=def_due_date, format="DD-MM-YYYY")
@@ -2104,7 +2360,7 @@ elif menu == "🎁 Bonuses":
             st.markdown("<hr/>", unsafe_allow_html=True)
             
         bonuses_data = execute_query("""
-            SELECT b.id, b.employee_id, e.name as employee_name, b.amount, b.date_declared, b.due_date
+            SELECT b.id, b.employee_id, e.name as employee_name, e.role, e.date_of_joining, b.amount, b.date_declared, b.due_date
             FROM bonuses b
             JOIN employees e ON b.employee_id = e.id
             ORDER BY b.due_date DESC, b.id DESC
@@ -2114,11 +2370,18 @@ elif menu == "🎁 Bonuses":
             df_bonuses = pd.DataFrame(bonuses_data)
             
             with c_exp:
+                eur_rate = get_eur_rate()
                 df_export = df_bonuses.copy()
-                df_export['Amount'] = df_export['amount'].apply(format_currency)
+                df_export['Role'] = df_export['role'].fillna('-')
+                df_export['Date of Joining'] = df_export['date_of_joining'].apply(format_display_date)
+                df_export['Amount (INR)'] = df_export['amount'].apply(format_currency_inr)
+                df_export['Amount (EUR)'] = df_export['amount'].apply(lambda x: format_eur(x, eur_rate))
                 df_export['Date Declared'] = df_export['date_declared'].apply(format_display_date)
                 df_export['Due Date'] = df_export['due_date'].apply(format_display_date)
-                df_table = df_export[['employee_id', 'employee_name', 'Amount', 'Date Declared', 'Due Date']].rename(columns={'employee_id': 'Emp ID', 'employee_name': 'Employee Name'})
+                df_table = df_export[[
+                    'employee_id', 'employee_name', 'Role', 'Date of Joining', 
+                    'Amount (INR)', 'Amount (EUR)', 'Date Declared', 'Due Date'
+                ]].rename(columns={'employee_id': 'Emp ID', 'employee_name': 'Employee Name'})
                 st.download_button(
                     label="📥 Export to XLSX",
                     data=to_excel(df_table),

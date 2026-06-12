@@ -19,22 +19,37 @@ for idx, row in df_emp.iterrows():
     cursor.execute("SELECT id FROM employees WHERE name = ?", (name,))
     if not cursor.fetchone():
         dept = str(row['Department']) if pd.notna(row['Department']) else ""
-        start_date_raw = row['Start Date']
-        start_date_str = ""
-        if pd.notna(start_date_raw):
+        
+        # Support flexible date of joining headers
+        doj_raw = None
+        for col in ['Date of Joining', 'Start Date', 'DOJ', 'date_of_joining', 'start_date']:
+            if col in row:
+                doj_raw = row[col]
+                break
+        
+        doj_str = ""
+        if pd.notna(doj_raw):
             try:
-                if isinstance(start_date_raw, datetime):
-                    start_date_str = start_date_raw.strftime('%Y-%m-%d')
+                if isinstance(doj_raw, datetime):
+                    doj_str = doj_raw.strftime('%Y-%m-%d')
                 else:
-                    start_date_str = pd.to_datetime(start_date_raw).strftime('%Y-%m-%d')
+                    doj_str = pd.to_datetime(doj_raw).strftime('%Y-%m-%d')
             except Exception:
                 pass
+                
+        # Support flexible role headers
+        role = None
+        for col in ['Role', 'role']:
+            if col in row:
+                role = str(row[col]).strip() if pd.notna(row[col]) else None
+                break
+                
         salary = float(row['Joining Salary']) if pd.notna(row['Joining Salary']) else 0.0
         status = str(row['Status']) if pd.notna(row['Status']) else "Active"
         cursor.execute("""
-            INSERT INTO employees (name, department, start_date, joining_salary, status)
-            VALUES (?, ?, ?, ?, ?)
-        """, (name, dept, start_date_str, salary, status))
+            INSERT INTO employees (name, department, date_of_joining, role, joining_salary, status)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (name, dept, doj_str, role, salary, status))
         print(f"Added employee: {name}")
 
 conn.commit()

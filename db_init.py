@@ -86,12 +86,16 @@ def init_db(force=False):
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT UNIQUE NOT NULL,
         department TEXT DEFAULT 'Tech',
-        start_date TEXT,
+        date_of_joining TEXT,
+        role TEXT,
         joining_salary REAL,
         current_salary REAL,
+        status TEXT DEFAULT 'Active',
         last_review_date TEXT,
         last_review_effective_date TEXT,
-        status TEXT DEFAULT 'Active'
+        resign_date TEXT,
+        lwd TEXT,
+        tenure REAL
     );
     """)
     
@@ -145,14 +149,29 @@ def import_new_template(file_path):
     for _, row in df_emp.iterrows():
         name = str(row['Name']).strip()
         dept = str(row['Department']).strip() if 'Department' in df_emp.columns else 'Tech'
-        start_date = parse_date(row['Start Date'])
+        
+        # Support flexible date of joining headers
+        doj_val = None
+        for col in ['Date of Joining', 'Start Date', 'DOJ', 'date_of_joining', 'start_date']:
+            if col in row:
+                doj_val = row[col]
+                break
+        date_of_joining = parse_date(doj_val)
+        
+        # Support flexible role headers
+        role = None
+        for col in ['Role', 'role']:
+            if col in row:
+                role = str(row[col]).strip() if pd.notna(row[col]) else None
+                break
+                
         joining_salary = parse_float(row['Joining Salary'])
         status = str(row['Status']).strip() if 'Status' in df_emp.columns else 'Active'
         
         cursor.execute("""
-            INSERT OR REPLACE INTO employees (name, department, start_date, joining_salary, current_salary, status)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (name, dept, start_date, joining_salary, joining_salary, status))
+            INSERT OR REPLACE INTO employees (name, department, date_of_joining, role, joining_salary, current_salary, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (name, dept, date_of_joining, role, joining_salary, joining_salary, status))
         
     # Get employee IDs map
     cursor.execute("SELECT id, name FROM employees")
@@ -240,7 +259,7 @@ def import_legacy_excel():
             continue
             
         name = str(name_val).strip()
-        start_date = parse_date(df.iloc[1, col_idx])
+        date_of_joining = parse_date(df.iloc[1, col_idx])
         joining_salary = parse_float(df.iloc[2, col_idx])
         
         status = 'Active'
@@ -252,9 +271,9 @@ def import_legacy_excel():
             status = 'Resigned'
             
         cursor.execute("""
-            INSERT OR REPLACE INTO employees (name, department, start_date, joining_salary, current_salary, status)
-            VALUES (?, 'Tech', ?, ?, ?, ?)
-        """, (name, start_date, joining_salary, joining_salary, status))
+            INSERT OR REPLACE INTO employees (name, department, date_of_joining, role, joining_salary, current_salary, status)
+            VALUES (?, 'Tech', ?, NULL, ?, ?, ?)
+        """, (name, date_of_joining, joining_salary, joining_salary, status))
         
         employee_id = cursor.lastrowid
         running_salary = joining_salary
@@ -315,7 +334,7 @@ def import_legacy_excel():
             
             cursor.execute("""
                 INSERT INTO salary_reviews (employee_id, review_name, review_date, previous_salary, increment_amount, increment_percentage, new_salary, effective_date, remark, status)
-                VALUES (?, 'Review-27', ?, ?, ?, ?, ?, ?, ?, 'Proposed')
+                VALUES (?, 'Review-26', ?, ?, ?, ?, ?, ?, ?, 'Proposed')
             """, (employee_id, proposed_eff_date, prev_salary, inc_amount, inc_percent, new_salary, proposed_eff_date, proposed_remark))
             
         cursor.execute("SELECT new_salary FROM salary_reviews WHERE employee_id = ? AND status = 'Finalized' ORDER BY id DESC LIMIT 1", (employee_id,))
@@ -357,3 +376,6 @@ def check_and_import():
 
 if __name__ == "__main__":
     check_and_import()
+
+# Alias for backwards compatibility with app.py DB reset logic
+import_excel = check_and_import
